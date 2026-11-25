@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+# 원본 다운로드 파일은 올리지 않음 (data/processed 결과는 올려도 됨)
+data/raw/

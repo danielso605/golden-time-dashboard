@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>우리 동네는 골든타임 안에 있을까?</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% macro card(g) %}
+<article class="card">
+  <header>
+    <span class="no">{{ g.no }}</span>
+    <h3>{{ g.title }}</h3>
+  </header>
+  {% if g.axes and g.axes != '-' %}<p class="axes"><b>축 읽는 법</b> {{ g.axes }}</p>{% endif %}
+  <div class="chart">{{ g.html|safe }}</div>
+  <div class="explain">
+    <ul>{% for d in g.desc %}<li {% if loop.last %}class="result"{% endif %}>{{ d }}</li>{% endfor %}</ul>
+  </div>
+  <p class="kind">{{ g.kind }}{% if g.used == 'mpld3' %} · 인터랙티브(mpld3){% endif %}</p>
+</article>
+{% endmacro %}
+
+<!-- ================= 머리말 ================= -->
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">공공데이터 분석 웹 대시보드</p>
+    <h1>우리 동네는 골든타임 안에 있을까?</h1>
+    <p class="sub">전국 응급의료 사각지대 지도와 응급실 신설 효과 시뮬레이션</p>
+    <nav class="toc">
+      <a href="#lookup">① 우리 동네 조회</a>
+      <a href="#analysis">② 사각지대 분석</a>
+      <a href="#sim">③ 신설 시뮬레이션</a>
+      <a href="#method">④ 분석 방법·한계</a>
+    </nav>
+  </div>
+</header>
+
+{% if is_sample %}
+<div class="notice wrap">
+  <strong>샘플 데이터로 실행 중입니다.</strong>
+  지금 보이는 지역·병원 이름과 좌표는 화면 구성을 확인하기 위한 <mark>가상 데이터</mark>입니다.
+  <code>collect_er.py</code>, <code>prepare_regions.py</code>로 실제 데이터를 만들면 자동으로 실제 데이터로 바뀝니다.
+</div>
+{% endif %}
+
+<!-- ================= 컨트롤 (form / select / button) ================= -->
+<form method="get" action="/" class="controls">
+  <div class="wrap controls-row">
+    <label>지역(시도)
+      <select name="sido">
+        <option value="전체" {% if sido == '전체' %}selected{% endif %}>전국</option>
+        {% for x in sido_list %}
+        <option value="{{ x }}" {% if sido == x %}selected{% endif %}>{{ x }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>골든타임 기준
+      <select name="crit">
+        {% for k, c in criteria.items() %}
+        <option value="{{ k }}" {% if crit == k %}selected{% endif %}>{{ c.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>그래프 방식
+      <select name="mode">
+        <option value="png" {% if mode == 'png' %}selected{% endif %}>이미지 (PNG, 권장)</option>
+        <option value="mpld3" {% if mode == 'mpld3' %}selected{% endif %} {% if not has_mpld3 %}disabled{% endif %}>인터랙티브 (mpld3, 선·점 그래프만)</option>
+      </select>
+    </label>
+    <button type="submit">적용하기</button>
+  </div>
+
+  <!-- ================= 요약 카드 ================= -->
+  <section class="wrap kpis">
+    <div class="kpi"><span>분석 인구</span><b>{{ "{:,}".format(s["pop"]) }}</b><small>{{ s.n_regions }}개 지역</small></div>
+    <div class="kpi"><span>응급의료기관</span><b>{{ n_er }}</b><small>곳 ({{ sido if sido != '전체' else '전국' }})</small></div>
+    <div class="kpi alert"><span>골든타임 밖 인구</span><b>{{ "{:,}".format(s.blind_pop) }}</b><small>{{ "%.1f"|format(s.blind_rate) }}% · {{ s.n_blind_regions }}개 지역</small></div>
+    <div class="kpi alert"><span>골든타임 밖 고령인구</span><b>{{ "{:,}".format(s.old_blind) }}</b><small>65세 이상의 {{ "%.1f"|format(s.old_blind_rate) }}%</small></div>
+    <div class="kpi alert"><span>골든타임 밖 어린이</span><b>{{ "{:,}".format(s.child_blind) }}</b><small>0~14세의 {{ "%.1f"|format(s.child_blind_rate) }}%</small></div>
+    <div class="kpi"><span>평균 이동시간</span><b>{{ "%.1f"|format(s.avg_min) }}분</b><small>인구 가중 평균</small></div>
+  </section>
+
+  <!-- ================= 핵심 요약 ================= -->
+  <section class="wrap summary">
+    <h2>핵심 요약</h2>
+    <ol>
+      {% for f in findings %}<li><span class="q-tag">{{ f.q }}</span> {{ f.text }}</li>{% endfor %}
+    </ol>
+  </section>
+
+  <!-- ================= ① 우리 동네 조회 ================= -->
+  <section id="lookup" class="wrap section">
+    <h2>① 우리 동네 조회</h2>
+    <p class="lead">사는 곳을 고르면 가장 가까운 응급의료기관과 예상 이동시간을 알려드려요.</p>
+    <div class="row-inline">
+      <select name="dong" class="wide">
+        {% for d in dong_list %}<option value="{{ d }}" {% if dong == d %}selected{% endif %}>{{ d }}</option>{% endfor %}
+      </select>
+      <button type="submit" formaction="/#lookup">조회하기</button>
+    </div>
+
+    {% if lookup %}
+    <div class="lookup">
+      <div>
+        {% set m = lookup.row.minutes %}
+        <p class="verdict {% if m > lookup.limit %}bad{% elif m > lookup.limit * 0.7 %}warn{% else %}good{% endif %}">
+          {% if m > lookup.limit %}⚠ 골든타임 밖 (사각지대)
+          {% elif m > lookup.limit * 0.7 %}△ 골든타임 경계
+          {% else %}✓ 골든타임 안{% endif %}
+        </p>
+        <p><strong>{{ lookup.rid }}</strong> · 기준 [{{ crit_info.label }}]에 맞는 가장 가까운 기관
+          <strong>{{ lookup.row.nearest_er }}</strong>까지 약 <strong>{{ "%.0f"|format(m) }}분</strong>
+          ({{ "%.1f"|format(lookup.row.km) }}km 직선거리)</p>
+        <table>
+          <thead><tr><th>가까운 순</th><th>기관명</th><th>등급</th><th>직선거리</th><th>예상 시간</th></tr></thead>
+          <tbody>
+          {% for n in lookup.near %}
+            <tr><td>{{ loop.index }}</td><td>{{ n.name }}</td><td>{{ n.grade }}</td>
+                <td>{{ "%.1f"|format(n.km) }}km</td><td>{{ "%.0f"|format(n.min) }}분</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <p class="hint">※ 응급실 운영 여부와 병상은 수시로 바뀝니다. 실제 응급 상황에서는 119에 먼저 연락하세요.</p>
+      </div>
+      <iframe title="선택 지역 지도" loading="lazy"
+        src="https://www.openstreetmap.org/export/embed.html?bbox={{ lookup.lon - 0.12 }}%2C{{ lookup.lat - 0.08 }}%2C{{ lookup.lon + 0.12 }}%2C{{ lookup.lat + 0.08 }}&layer=mapnik&marker={{ lookup.lat }}%2C{{ lookup.lon }}"></iframe>
+    </div>
+    {% endif %}
+  </section>
+
+  <!-- ================= ② 분석 그래프 ================= -->
+  <section id="analysis" class="wrap section">
+    <h2>② 응급의료 사각지대 분석: 세 가지 질문</h2>
+    <p class="lead">기준: <strong>{{ crit_info.label }}</strong> · 지역: <strong>{{ sido if sido != '전체' else '전국' }}</strong>
+      — 위의 콤보박스를 바꾸면 모든 그래프와 설명의 숫자가 함께 바뀝니다.</p>
+
+    <div class="q-head">
+      <span class="q-tag">질문 1</span>
+      <h3>어디가 골든타임 밖인가?</h3>
+      <p>{{ findings[0].text }}</p>
+    </div>
+    <div class="stack">{% for g in graphs.where %}{{ card(g) }}{% endfor %}</div>
+
+    <h3 class="table-title">골든타임 밖 인구가 많은 지역 Top 10</h3>
+    <table>
+      <thead><tr><th>순위</th><th>지역</th><th>인구</th><th>고령비율</th><th>어린이비율</th><th>가장 가까운 기관</th><th>예상 시간</th></tr></thead>
+      <tbody>
+      {% for r in top10.itertuples() %}
+        <tr><td>{{ loop.index }}</td><td>{{ r.rid }}</td><td>{{ "{:,}".format(r.pop) }}</td>
+            <td>{{ "%.1f"|format(r.old_ratio * 100) }}%</td><td>{{ "%.1f"|format(r.child_ratio * 100) }}%</td><td>{{ r.nearest_er }}</td><td>{{ "%.0f"|format(r.minutes) }}분</td></tr>
+      {% else %}
+        <tr><td colspan="7">선택한 지역에는 골든타임 밖 지역이 없습니다.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="q-head">
+      <span class="q-tag">질문 2</span>
+      <h3>누가 더 위험한가?</h3>
+      <p>{{ findings[1].text }}</p>
+    </div>
+    <div class="stack">{% for g in graphs.who %}{{ card(g) }}{% endfor %}</div>
+
+    <div class="q-head">
+      <span class="q-tag">질문 3</span>
+      <h3>왜 사각지대가 생기나?</h3>
+      <p>응급실 '수'보다 '거리'가 문제입니다. 사각지대는 인구 대비 기관 수가 적어서가 아니라, 넓은 농어촌에서 주변 반경 안에 응급실이 거의 없어서 생깁니다.</p>
+    </div>
+    <div class="stack">{% for g in graphs.why %}{{ card(g) }}{% endfor %}</div>
+  </section>
+
+  <!-- ================= ③ 신설 시뮬레이션 ================= -->
+  <section id="sim" class="wrap section">
+    <h2>③ 응급실 신설 효과 시뮬레이션</h2>
+    <p class="lead">사각지대 지역 중 한 곳에 가상의 응급의료센터를 세우면 몇 명이 골든타임 안으로 들어올까요?</p>
+
+    <div class="sim-controls">
+      <div>
+        <h4>직접 고르기</h4>
+        <div class="row-inline">
+          <select name="sim" class="wide">
+            <option value="">— 사각지대 지역 선택 ({{ candidates|length }}곳) —</option>
+            {% for c in candidates %}<option value="{{ c }}" {% if sim == c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+          </select>
+          <button type="submit" formaction="/#sim" name="auto" value="0">이 위치에 신설</button>
+        </div>
+      </div>
+      <div>
+        <h4>자동 추천 (탐욕 알고리즘)</h4>
+        <div class="row-inline">
+          {% for n in [1, 3, 5] %}
+          <button type="submit" formaction="/#sim" name="auto" value="{{ n }}" class="ghost {% if auto_n == n %}on{% endif %}">추천 {{ n }}곳 신설</button>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <h3 class="table-title">사각지대 해소 효과가 큰 신설 후보 Top 5</h3>
+    <table>
+      <thead><tr><th>순서</th><th>후보지</th><th>새로 골든타임 안에 들어오는 인구</th></tr></thead>
+      <tbody>
+      {% for r in recs %}
+        <tr><td>{{ loop.index }}</td><td>{{ r.rid }}</td><td>{{ "{:,}".format(r.saved) }}명</td></tr>
+      {% else %}
+        <tr><td colspan="3">추천할 후보가 없습니다 (사각지대 없음).</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="hint">앞에서 고른 곳이 해결한 지역은 다음 후보 계산에서 빼기 때문에, 순서대로 지을 때 각각 추가로 구제되는 인구입니다.</p>
+
+    {% if sim_result %}
+    <div class="sim-summary">
+      <p>신설 위치: {% for p in sim_result.picks %}<strong>{{ p.rid }}</strong>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+      <p class="big">골든타임 밖 인구 <b>{{ "{:,}".format(s.blind_pop) }}</b> → <b>{{ "{:,}".format(sim_result.after.blind_pop) }}</b>
+        <span class="down">▼ {{ "{:,}".format(sim_result.saved) }}명</span></p>
+    </div>
+    <div class="stack">{% for g in sim_result.graphs %}{{ card(g) }}{% endfor %}</div>
+    {% else %}
+    <p class="empty">위에서 위치를 고르거나 추천 버튼을 누르면 결과 그래프가 나타납니다.</p>
+    {% endif %}
+  </section>
+</form>
+
+<!-- ================= ④ 분석 방법과 한계 ================= -->
+<section id="method" class="wrap section">
+  <h2>④ 분석 방법과 한계</h2>
+  <ol>
+    <li><strong>데이터</strong>: 국립중앙의료원 전국 응급의료기관 정보(공공데이터포털 Open API), 행정안전부 시군구별/1세별 주민등록인구(KOSIS, 2026.10). 고령인구는 65세 이상, 어린이는 0~14세 합계입니다.</li>
+    <li><strong>골든타임 기준</strong>: 보건복지부 응급의료 취약지 판단 기준을 참고해 '지역응급의료센터 이상 30분', '권역응급의료센터 60분'을 사용했습니다.</li>
+    <li><strong>이동시간</strong>: 두 지점의 직선거리(하버사인 공식) × 도로 보정계수 {{ detour }} ÷ 평균속도 {{ speed|int }}km/h 로 추정했습니다.</li>
+    <li><strong>시뮬레이션</strong>: 신설 후보지는 현재 사각지대 지역의 대표 좌표이며, 사각지대 인구를 가장 많이 줄이는 곳을 하나씩 고르는 탐욕(greedy) 알고리즘을 사용했습니다.</li>
+  </ol>
+  <blockquote>
+    한계: 시군구를 점 하나로 보았기 때문에 같은 시군구 안의 외곽 마을은 실제보다 가깝게 계산될 수 있습니다.
+    또한 실제 도로망, 교통 체증, 응급실 병상 포화(이른바 '응급실 뺑뺑이')는 반영하지 않았습니다.
+  </blockquote>
+</section>
+
+<footer class="wrap foot">
+  <hr>
+  <p>Python · Pandas · Matplotlib · Seaborn · mpld3 · Flask · Docker · GitHub</p>
+</footer>
+</body>
+</html>
