@@ -108,6 +108,13 @@ def main():
     jsonResult, result = getEmergencyService()
     os.makedirs("data/processed", exist_ok=True)
 
+    # 안전장치: 받아 온 기관이 너무 적으면(키 오류·응답 실패) 기존 파일을 덮어쓰지 않는다
+    MIN_COUNT = 100
+    if len(result) < MIN_COUNT:
+        print("[경고] 응급의료기관을 %d건밖에 받지 못했습니다. 인증키(DATA_GO_KR_KEY)나 API 응답을 확인하세요." % len(result))
+        print("       기존 data/processed/er.csv 는 그대로 두고 종료합니다.")
+        return
+
     # 파일저장 1 : json 파일
     with open('data/processed/er.json', 'w', encoding='utf8') as outfile:
         outfile.write(json.dumps(jsonResult, indent=4, ensure_ascii=False))
@@ -120,8 +127,12 @@ def main():
     print("등급별 개수(원본):\n", df["grade"].value_counts())
     df = df.dropna(subset=["lat", "lon"])
     df = df[df["grade"].isin(GRADES)]        # 3개 등급만 사용
-    df[["name", "sido", "grade", "lat", "lon"]].to_csv(
-        'data/processed/er.csv', index=False, encoding='utf-8-sig')
+    if len(df) < MIN_COUNT:
+        print("[경고] 정리 후 %d건만 남았습니다. 기존 er.csv 는 그대로 둡니다." % len(df))
+        return
+    tmp = 'data/processed/er_tmp.csv'                 # 임시 파일에 먼저 쓰고, 끝까지 성공하면 교체
+    df[["name", "sido", "grade", "lat", "lon"]].to_csv(tmp, index=False, encoding='utf-8-sig')
+    os.replace(tmp, 'data/processed/er.csv')
     print("저장 완료: %d건 → data/processed/er.csv" % len(df))
 
 

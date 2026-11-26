@@ -25,13 +25,26 @@ METRO = ["부산광역시", "대구광역시", "광주광역시", "대전광역�
 ISLANDS = ["인천광역시 옹진군", "경상북도 울릉군"]
 
 
+def _valid(folder):
+    """er.csv·regions.csv가 있고, 응급의료기관 3개 등급이 모두 들어 있는지 확인"""
+    try:
+        er = pd.read_csv(os.path.join(folder, "er.csv"), encoding="utf-8-sig")
+        rg = pd.read_csv(os.path.join(folder, "regions.csv"), encoding="utf-8-sig")
+        return len(rg) > 0 and set(GRADES) <= set(er["grade"]) and len(er) >= 100
+    except Exception:
+        return False
+
+
 def load_data(base="data"):
-    """실제 데이터(data/processed)가 있으면 그것을, 없으면 샘플을 읽는다."""
-    real = os.path.join(base, "processed")
-    if os.path.exists(os.path.join(real, "er.csv")) and os.path.exists(os.path.join(real, "regions.csv")):
-        folder, is_sample = real, False
-    else:
-        folder, is_sample = os.path.join(base, "sample"), True
+    """실제 데이터(processed) → 백업(backup) → 샘플(sample) 순서로, 정상인 첫 폴더를 읽는다."""
+    folder, is_sample = os.path.join(base, "sample"), True
+    for name in ["processed", "backup"]:
+        f = os.path.join(base, name)
+        if _valid(f):
+            folder, is_sample = f, False
+            break
+        if os.path.exists(os.path.join(f, "er.csv")):
+            print(f"[경고] {f} 의 데이터가 비어 있거나 손상되어 건너뜁니다.")
     regions = pd.read_csv(os.path.join(folder, "regions.csv"), encoding="utf-8-sig")
     er = pd.read_csv(os.path.join(folder, "er.csv"), encoding="utf-8-sig")
     regions["rid"] = regions["sido"] + " " + regions["sigungu"]
