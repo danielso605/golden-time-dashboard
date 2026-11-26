@@ -16,8 +16,11 @@ matplotlib.use("Agg")                      # 서버(Flask)에서 창 없이 그�
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib import font_manager
+from matplotlib.patches import Polygon
+import matplotlib.patheffects as pe
 
 from analysis import CRITERIA, GRADES, haversine_km
+import korea_outline as K
 
 # ---------------- 공통 스타일 ----------------
 _KR_FONTS = ["Malgun Gothic", "AppleGothic", "NanumGothic", "Noto Sans CJK KR", "Noto Sans KR"]
@@ -80,6 +83,14 @@ def short(sido):
     return {"전북특별자치도": "전북", "전남광주통합특별시": "전남광주"}.get(sido, sido[:2])
 
 
+def josa(word, a="은", b="는"):
+    """받침 있으면 a(은/이), 없으면 b(는/가)"""
+    ch = word[-1]
+    if "가" <= ch <= "힣":
+        return word + (a if (ord(ch) - 0xAC00) % 28 else b)
+    return word + b
+
+
 def _fmt_pop(n):
     return f"{n / 10000:,.1f}만 명" if n >= 10000 else f"{n:,}명"
 
@@ -104,38 +115,95 @@ def placeholder(title, reason):
 # =====================================================================
 # ① 어디가 골든타임 밖인가?
 # =====================================================================
-def map_chart(scope, er, crit_key, new_er=None, title=None):
+def _land(ax):
+    """간략 국토 윤곽을 바다색 배경 위에 그린다"""
+    ax.set_facecolor("#e9f1f9")                       # 바다
+    for poly in [K.MAINLAND, K.JEJU] + K.ISLANDS + list(K.FAR.values()):
+        ax.add_patch(Polygon(poly, closed=True, facecolor="#f7f6f2", edgecolor="#b8b6ad",
+                             linewidth=0.9, zorder=1))
+
+
+def map_chart(scope, er, crit_key, new_er=None, title=None, full=None):
+    """전국 지도 위에 시군구를 이동시간 색으로 표시. 시도를 고르면 그 시도만 색칠하고 나머지는 회색으로 둔다."""
     c = CRITERIA[crit_key]
-    fig, ax = _fig(7.5, 8)
-    bins = pd.cut(scope["minutes"], TIME_BINS, labels=TIME_LABELS)
-    size = np.sqrt(scope["pop"]) / np.sqrt(scope["pop"].max()) * 380 + 18
-    lat0, lat1 = scope["lat"].min() - 0.15, scope["lat"].max() + 0.15
-    lon0, lon1 = scope["lon"].min() - 0.15, scope["lon"].max() + 0.15
-    shown = er[er["lat"].between(lat0, lat1) & er["lon"].between(lon0, lon1)]
+    far = scope[scope["lon"].lt(125.3) | scope["lon"].gt(130.3)]          # 옹진군(백령도)·울릉군
+    main = scope.drop(far.index)
+    lon0, lon1, lat0, lat1 = 125.75, 129.75, 33.05, 38.70                # 국토 전체가 항상 보이도록 고정 범위
+    k = 1 / np.cos(np.radians((lat0 + lat1) / 2))                         # 위도에 따른 가로·세로 비율 보정
+    fig, ax = plt.subplots(figsize=(7.2, 9.6), dpi=110)
+    _land(ax)
+    if full is not None and len(full) > len(scope):                       # 선택하지 않은 시도는 회색 점
+        rest = full[~full["rid"].isin(scope["rid"])]
+        ax.scatter(rest["lon"], rest["lat"], s=12, c="#cfcdc6", edgecolors="none", zorder=2,
+                   label="다른 시도 시군구")
+
+    # 응급의료기관: 이 기준에서 '도착지'로 인정하는 등급만 작게 표시
+    use = er[er["grade"].isin(c["grades"])]
     for g in GRADES[::-1]:
-        e, st = shown[shown["grade"] == g], GRADE_STYLE[g]
-        ax.scatter(e["lon"], e["lat"], c=st["color"], marker=st["marker"], s=st["s"] * 0.8,
-                   edgecolors="#1b1b1a", linewidths=0.4, label=g, zorder=5)
+        if g not in c["grades"]:
+            continue
+        e, st = use[use["grade"] == g], GRADE_STYLE[g]
+        ax.scatter(e["lon"], e["lat"], c=st["color"], marker=st["marker"], s=st["s"] * 0.55,
+                   edgecolors="white", linewidths=0.5, label=g, zorder=5)
+
+    # 시군구: 색 = 이동시간 구간, 크기 = 인구
+    pmax = (full if full is not None else scope)["pop"].max()          # 점 크기 기준을 전국과 같게
+    size = np.sqrt(scope["pop"]) / np.sqrt(pmax) * 260 + 14
+    bins = pd.cut(scope["minutes"], TIME_BINS, labels=TIME_LABELS)
     for lab, col in zip(TIME_LABELS, TIME_COLORS):
         m = bins == lab
-        ax.scatter(scope.loc[m, "lon"], scope.loc[m, "lat"], s=size[m], c=col, alpha=0.9,
-                   edgecolors="white", linewidths=1, label=f"시군구: {lab}", zorder=3)
+        ax.scatter(scope.loc[m, "lon"], scope.loc[m, "lat"], s=size[m], c=col, alpha=0.85,
+                   edgecolors="white", linewidths=0.8, label=f"시군구 {lab}", zorder=3)
     if new_er is not None and len(new_er):
-        ax.scatter(new_er["lon"], new_er["lat"], marker="P", s=320, c="#6250d6",
-                   edgecolors="white", linewidths=1.5, label="신설 응급실(가상)", zorder=6)
+        ax.scatter(new_er["lon"], new_er["lat"], marker="P", s=300, c="#6250d6",
+                   edgecolors="white", linewidths=1.5, label="신설 응급실(가상)", zorder=7)
+
+    # 인구가 많은 사각지대 3곳 이름 표시
+    halo = [pe.withStroke(linewidth=3, foreground="white")]
+    for r in main[main["blind"]].nlargest(3, "pop").itertuples():
+        ax.annotate(f"{r.sigungu} {r.minutes:.0f}분", (r.lon, r.lat), xytext=(7, 5), textcoords="offset points",
+                    fontsize=9, color=INK, path_effects=halo, zorder=8)
+
     ax.set_xlim(lon0, lon1); ax.set_ylim(lat0, lat1)
-    ax.set_aspect(1 / np.cos(np.radians(scope["lat"].mean())))
-    _style(ax, "점 = 시군구(클수록 인구 많음) · 색 = 가장 가까운 응급실까지 예상 시간", "경도 (동쪽 →)", "위도 (북쪽 ↑)", grid=None)
-    ax.legend(loc="lower right", fontsize=8.5, framealpha=0.95, title="범례", title_fontsize=9)
+    ax.set_aspect(k)
+    ax.set_xticks([]); ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_color("#cfd8e3")
+    ax.set_title("점 = 시군구 (클수록 인구 많음) · 색 = 가장 가까운 응급실까지 예상 시간",
+                 loc="left", fontsize=10.5, color=MUTED, pad=8)
+
+    # 멀리 떨어진 섬은 작은 박스로 따로 표시
+    spots = {"옹진군": [0.015, 0.83, 0.13, 0.14], "울릉군": [0.855, 0.83, 0.13, 0.14]}
+    for r in far.itertuples():
+        ins = ax.inset_axes(spots.get(r.sigungu, [0.02, 0.6, 0.17, 0.17]))
+        ins.set_facecolor("#e9f1f9")
+        poly = K.FAR.get(r.sigungu)
+        if poly:
+            ins.add_patch(Polygon(poly, closed=True, facecolor="#f7f6f2", edgecolor="#b8b6ad", linewidth=0.8))
+        col = TIME_COLORS[int(np.digitize(r.minutes, TIME_BINS[1:-1]))]
+        ins.scatter([r.lon], [r.lat], s=60, c=col, edgecolors="white", linewidths=0.8, zorder=3)
+        ins.set_xlim(r.lon - 0.2, r.lon + 0.2); ins.set_ylim(r.lat - 0.12, r.lat + 0.12)
+        ins.set_xticks([]); ins.set_yticks([])
+        for sp in ins.spines.values():
+            sp.set_color("#8a8984")
+        ins.set_title(f"{r.sigungu} {r.minutes:.0f}분", fontsize=8.5, color=INK, pad=2)
+
+    hs, ls = ax.get_legend_handles_labels()                   # 범례 순서: 시간 구간 → 응급의료기관 → 기타
+    rank = lambda l: (0 if l.startswith("시군구") else 1 if "응급" in l and "신설" not in l else 2)
+    pairs = sorted(zip(hs, ls), key=lambda p: rank(p[1]))
+    ax.legend([p[0] for p in pairs], [p[1] for p in pairs], loc="upper center", bbox_to_anchor=(0.5, -0.01),
+              ncol=4, fontsize=8.5, frameon=False, handletextpad=0.3, columnspacing=1.0)
+    fig.tight_layout()
     blind = scope[scope["blind"]]
     head = title or f"골든타임 밖 시군구 {len(blind)}곳에 {_fmt_pop(int(blind['pop'].sum()))}이 산다"
-    return dict(title=head, interactive=False, fig=fig, kind="지도형 산점도 (plt.scatter)",
-                axes="가로축 = 경도, 세로축 = 위도 (지도 좌표) · 점 크기 = 인구 · 점 색 = 이동시간",
+    return dict(title=head, interactive=False, fig=fig, kind="지도형 산점도 (plt.scatter + 국토 윤곽 Polygon)",
+                axes="지도 위치 = 실제 위치 · 점 크기 = 인구 · 점 색 = 이동시간 (연한 노랑 → 진한 빨강일수록 멂)",
                 desc=[
-        "진한 빨강일수록 응급실이 멀고, 점이 클수록 사람이 많이 사는 곳입니다. ★▲●는 응급의료기관의 등급입니다.",
-        "크고 진한 점이 '사람은 많은데 응급실은 먼' 우선 해결 지역입니다.",
-        f"이번 결과: 기준({c['label']})에서 골든타임 밖 시군구는 {len(blind)}곳, 인구 {_fmt_pop(int(blind['pop'].sum()))}입니다.",
+        f"진한 빨강일수록 응급실이 멀고, 점이 클수록 사람이 많이 사는 곳입니다. ★▲●는 이 기준({c['label']})에서 도착지로 인정하는 응급의료기관입니다.",
+        "크고 진한 점이 '사람은 많은데 응급실은 먼' 우선 해결 지역이며, 인구가 많은 사각지대 3곳은 이름을 적었습니다.",
+        f"이번 결과: 골든타임 밖 시군구는 {len(blind)}곳, 인구 {_fmt_pop(int(blind['pop'].sum()))}입니다.",
     ])
+
 
 
 def sido_rate_chart(full, sel_sido):
@@ -149,10 +217,10 @@ def sido_rate_chart(full, sel_sido):
     ax.set_xlim(0, max(g.max() * 1.18, 5))
     _style(ax, "시도 인구 중 골든타임 밖에 사는 사람의 비율", "골든타임 밖 인구 비율 (%)", "", grid="x")
     top = g.index[-1]
-    head = f"{short(top)}은 주민 {g.iloc[-1]:.0f}%가 골든타임 밖, 전국 평균의 {g.iloc[-1] / max(nat, 0.1):.1f}배"
+    head = f"{josa(short(top))} 주민 {g.iloc[-1]:.0f}%가 골든타임 밖, 전국 평균의 {g.iloc[-1] / max(nat, 0.1):.1f}배"
     if sel_sido in g.index and sel_sido != top:
         rank = len(g) - list(g.index).index(sel_sido)
-        head = f"{short(sel_sido)}의 골든타임 밖 비율은 {g[sel_sido]:.1f}%, 17개 시도 중 {rank}위"
+        head = f"{short(sel_sido)}의 골든타임 밖 비율은 {g[sel_sido]:.1f}%, {len(g)}개 시도 중 {rank}위"
     return dict(title=head, interactive=False, fig=fig, kind="가로 막대 (plt.barh)",
                 axes="가로축 = 골든타임 밖 인구 비율(%) · 세로축 = 시도",
                 desc=[
@@ -189,32 +257,58 @@ def cdf_chart(full, crit_key):
     ])
 
 
-def sido_box_chart(full, crit_key):
+def sido_mix_chart(full, crit_key):
+    """시도별로 시군구를 이동시간 구간으로 나눠 100% 막대로 보여준다"""
     limit = CRITERIA[crit_key]["limit"]
-    order = full.groupby("sido")["minutes"].median().sort_values().index
-    fig, ax = _fig(10, 5.2)
-    sns.boxplot(data=full, x="sido", y="minutes", order=order, color="#d6e4f5", fliersize=0,
-                linewidth=1, ax=ax)
-    sns.stripplot(data=full, x="sido", y=full["minutes"].clip(upper=Y_CAP), order=order, color=BLUE,
-                  size=3.5, alpha=0.65, jitter=0.2, ax=ax)
-    _hline(ax, limit, -0.5, len(order) - 0.5, f"골든타임 {limit}분")
-    ax.set_ylim(0, Y_CAP + 8)
-    ax.set_xticks(range(len(order)))
-    ax.set_xticklabels([short(s) for s in order])
-    over = full[full["minutes"] > Y_CAP]
-    if len(over):
-        names = ", ".join(f"{r.sigungu} {r.minutes:.0f}분" for r in over.itertuples())
-        ax.text(0, Y_CAP + 2, f"▲ {Y_CAP}분 초과(섬): {names}", fontsize=9, color=MUTED, va="bottom")
-    _style(ax, "점 = 시군구 하나 · 상자 = 가운데 50% 범위 · 상자 안 선 = 중앙값", "", "응급실까지 예상 이동시간 (분)")
-    iqr = full.groupby("sido")["minutes"].agg(lambda x: x.quantile(.75) - x.quantile(.25)).sort_values()
-    return dict(title=f"도 지역은 같은 시도 안에서도 격차가 크다: {short(iqr.index[-1])}는 지역 간 {iqr.iloc[-1]:.0f}분 차이",
-                interactive=False, fig=fig, kind="박스플롯 + 스트립플롯 (sns.boxplot, sns.stripplot)",
-                axes=f"가로축 = 시도(중앙값이 짧은 순) · 세로축 = 시군구별 예상 이동시간(분, {Y_CAP}분에서 자름)",
+    bins = pd.cut(full["minutes"], TIME_BINS, labels=TIME_LABELS)
+    tab = pd.crosstab(full["sido"], bins).reindex(columns=TIME_LABELS, fill_value=0)
+    n = tab.sum(axis=1)
+    out = full.groupby("sido")["blind"].sum().reindex(tab.index)
+    share = (tab.div(n, axis=0) * 100)
+    order = (out / n).sort_values(kind="stable").index        # 골든타임 밖 비율이 낮은 순 → 높은 시도가 맨 위
+    share, n, out = share.loc[order], n.loc[order], out.loc[order]
+    fig, ax = _fig(9.5, 6.4)
+    y = np.arange(len(order))
+    left = np.zeros(len(order))
+    for lab, col in zip(TIME_LABELS, TIME_COLORS):
+        v = share[lab].values
+        ax.barh(y, v, left=left, color=col, height=0.68, edgecolor="white", linewidth=1.2, label=lab)
+        for yi, (l, val) in enumerate(zip(left, v)):           # 칸이 넓을 때만 % 글자
+            if val >= 12:
+                ax.text(l + val / 2, yi, f"{val:.0f}%", ha="center", va="center", fontsize=8.5,
+                        color="white" if lab in TIME_LABELS[2:] else INK)
+        left += v
+    for yi, s in enumerate(order):
+        ax.text(101.5, yi, f"{int(out[s])}/{int(n[s])}곳 밖", va="center", fontsize=9.5,
+                color=ORANGE if out[s] else MUTED, fontweight="bold" if out[s] / n[s] >= 0.5 else None)
+    ax.set_yticks(y); ax.set_yticklabels([short(s) for s in order])
+    ax.set_xlim(0, 100); ax.set_xticks([0, 25, 50, 75, 100]); ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, frameon=False, fontsize=9.5,
+              title="가장 가까운 응급실까지 예상 시간", title_fontsize=9.5)
+    _style(ax, "막대 하나 = 시도 하나 · 칸 = 그 시도 시군구 중 해당 시간대 비율 · 오른쪽 = 골든타임 밖 시군구 수",
+           "시군구 비율 (%)", "", grid=None)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    ratio = out / n
+    half = [short(s) for s in ratio[ratio >= 0.5].sort_values(ascending=False).index]
+    top = ratio.idxmax()
+    if len(half) > 3:
+        head = f"{'·'.join(half[:3])} 등 {len(half)}개 시도는 시군구 절반 이상이 골든타임 밖"
+    elif half:
+        head = f"{josa('·'.join(half))} 시군구 절반 이상이 골든타임 밖"
+    elif ratio.max() > 0:
+        head = f"{josa(short(top))} 시군구 {int(n[top])}곳 중 {int(out[top])}곳이 골든타임 밖"
+    else:
+        head = "모든 시도의 시군구가 골든타임 안에 있다"
+    dark = "진한 빨강 칸" if limit >= 60 else "빨강·진한 빨강 칸"
+    return dict(title=head, interactive=False, fig=fig, kind="100% 누적 가로 막대 (plt.barh, left=)",
+                axes="가로축 = 시도 안 시군구 비율(%, 합계 100%) · 세로축 = 시도(골든타임 밖 비율이 높은 순으로 위)",
                 desc=[
-        "상자가 위에 있을수록 그 시도는 전반적으로 응급실이 멀고, 상자가 길수록 같은 시도 안에서도 동네마다 차이가 큽니다.",
-        f"섬 지역처럼 {Y_CAP}분을 넘는 값은 그래프 위쪽에 이름과 시간을 따로 적었습니다.",
-        f"이번 결과: 지역 간 격차(가운데 50% 범위)가 가장 큰 곳은 {iqr.index[-1]}({iqr.iloc[-1]:.0f}분)입니다.",
+        f"막대 하나가 한 시도의 시군구 전체(100%)입니다. 빨간 칸이 길수록 응급실이 먼 동네가 많은 시도입니다.",
+        f"이 기준(골든타임 {limit}분)에서는 {dark}이 골든타임 밖이고, 오른쪽 숫자는 '골든타임 밖 시군구 수 / 전체 시군구 수'입니다.",
+        f"이번 결과: 골든타임 밖 시군구 비율이 가장 높은 곳은 {top}({int(out[top])}/{int(n[top])}곳)입니다.",
     ])
+
 
 
 # =====================================================================
@@ -343,7 +437,7 @@ def per_capita_chart(full, er, sel_sido):
     _hline(ax, nat, -0.5, len(per) - 0.5, f"전국 {nat:.2f}")
     ax.set_ylim(0, per.max() * 1.18)
     _style(ax, "응급의료기관 수 ÷ 인구 × 10만", "", "인구 10만 명당 응급의료기관 수 (곳)")
-    return dict(title=f"인구 대비 기관 수는 {short(per.index[0])}가 가장 많다: 그런데도 사각지대가 생기는 건 '거리' 때문",
+    return dict(title=f"인구 대비 기관 수는 {josa(short(per.index[0]), '이', '가')} 가장 많다: 그런데도 사각지대가 생기는 건 '거리' 때문",
                 interactive=False, fig=fig, kind="세로 막대 (plt.bar)",
                 axes="가로축 = 시도 · 세로축 = 인구 10만 명당 응급의료기관 수(곳) · 점선 = 전국 평균",
                 desc=[
@@ -353,35 +447,47 @@ def per_capita_chart(full, er, sel_sido):
     ])
 
 
-def supply_chart(scope, er, radius=20):
+def supply_chart(scope, er, radius=20, top_n=12):
+    """골든타임 밖 시군구마다 주변 응급의료기관 수를 롤리팝으로, 골든타임 안 시군구의 보통 수준과 비교"""
     d = haversine_km(scope["lat"].values[:, None], scope["lon"].values[:, None],
                      er["lat"].values[None, :], er["lon"].values[None, :])
-    t = scope.assign(er_near=(d <= radius).sum(axis=1), pop_man=scope["pop"] / 10000)
-    fig, ax = _fig()
+    t = scope.assign(er_near=(d <= radius).sum(axis=1))
     ok, bad = t[~t["blind"]], t[t["blind"]]
-    ax.scatter(ok["pop_man"], ok["er_near"], s=30, c=BLUE, alpha=0.5, edgecolors="white", label="골든타임 안")
-    ax.scatter(bad["pop_man"], bad["er_near"], s=48, c=ORANGE, alpha=0.95, edgecolors="white", marker="D",
-               label="골든타임 밖")
-    top = bad.sort_values("pop", ascending=False).head(4)
-    xmax, ymax = t["pop_man"].max(), max(t["er_near"].max(), 10)
-    for i, r in enumerate(top.itertuples()):              # 이름은 오른쪽 빈 공간에 세로로 줄 세우고 선으로 연결
-        ax.annotate(f"{short(r.sido)} {r.sigungu} ({r.pop_man:.0f}만 명)", (r.pop_man, r.er_near),
-                    xytext=(xmax * 0.62, ymax * (0.50 - i * 0.075)), textcoords="data", fontsize=9.5, color=INK,
-                    bbox=dict(facecolor="white", edgecolor=ORANGE, boxstyle="round,pad=0.25", linewidth=0.6),
-                    arrowprops=dict(arrowstyle="-", color=ORANGE, linewidth=0.8, shrinkB=4))
-    ax.legend(loc="upper left", frameon=False)
-    ax.set_ylim(bottom=-1)
-    _style(ax, f"점 = 시군구 하나 · 주변 = 시군구 중심에서 반경 {radius}km", "인구 (만 명)", f"반경 {radius}km 안 응급의료기관 수 (곳)", grid="both")
-    mx = int(bad["er_near"].max()) if len(bad) else 0
-    return dict(title=f"골든타임 밖 지역은 모두 주변 {radius}km 안 응급의료기관이 {mx}곳 이하" if len(bad)
-                else "선택한 지역에는 골든타임 밖 시군구가 없다",
-                interactive=False, fig=fig, kind="산점도 + 주석 (plt.scatter, ax.annotate)",
-                axes=f"가로축 = 시군구 인구(만 명) · 세로축 = 반경 {radius}km 안 응급의료기관 수(곳)",
+    if bad.empty:
+        g = placeholder("선택한 지역에는 골든타임 밖 시군구가 없다", "골든타임 밖 시군구가 없어 비교할 대상이 없습니다.")
+        g["desc"] = ["이 그래프는 골든타임 밖 시군구의 주변 응급의료기관 수를 보여 줍니다.",
+                     "선택한 지역은 모든 시군구가 골든타임 안이라 표시할 막대가 없습니다(좋은 결과입니다).",
+                     "이번 결과: 골든타임 밖 시군구 0곳"]
+        return g
+    show = bad.nlargest(top_n, "pop").sort_values("pop")          # 인구 많은 순으로 위
+    fig, ax = _fig(9.5, 0.42 * len(show) + 1.9)
+    y = np.arange(len(show))
+    ax.hlines(y, 0, show["er_near"], color=ORANGE, linewidth=2.2, zorder=2)
+    ax.scatter(show["er_near"], y, s=70, c=ORANGE, edgecolors="white", linewidths=1, zorder=3)
+    for yi, r in enumerate(show.itertuples()):
+        ax.text(r.er_near + 0.6, yi, f"{r.er_near}곳", va="center", fontsize=9.5, color=INK)
+    ref = float(ok["er_near"].median()) if len(ok) else None
+    xmax = max(show["er_near"].max(), ref or 0) * 1.25 + 2
+    if ref is not None:
+        _vline(ax, ref, -0.6, len(show) - 0.4, f"골든타임 안 시군구 보통 {ref:.0f}곳")
+    ax.set_yticks(y)
+    ax.set_yticklabels([f"{short(r.sido)} {r.sigungu} ({r.pop / 10000:.0f}만 명)" for r in show.itertuples()])
+    ax.set_xlim(0, xmax); ax.set_ylim(-0.7, len(show) + 0.2)
+    _style(ax, f"선 길이 = 시군구 중심에서 반경 {radius}km 안 응급의료기관 수 · 인구 많은 사각지대 {len(show)}곳",
+           f"반경 {radius}km 안 응급의료기관 수 (곳)", "", grid="x")
+    fig.tight_layout()
+    med_bad = float(bad["er_near"].median())
+    head = (f"골든타임 밖 지역 주변 {radius}km엔 응급의료기관이 보통 {med_bad:.0f}곳"
+            + (f", 골든타임 안 지역은 {ref:.0f}곳" if ref is not None else ""))
+    return dict(title=head, interactive=False, fig=fig, kind="롤리팝 차트 (plt.hlines + plt.scatter)",
+                axes=f"가로축 = 반경 {radius}km 안 응급의료기관 수(곳) · 세로축 = 골든타임 밖 시군구(괄호 = 인구)",
                 desc=[
-        "주황 마름모(골든타임 밖)가 그래프 아래쪽에 몰려 있으면, 사각지대의 원인이 '주변에 응급실이 거의 없음'이라는 뜻입니다.",
-        "오른쪽 아래(인구는 많은데 주변 기관이 적은 곳)에 있는 지역이 신설 효과가 가장 큰 후보입니다.",
-        "이번 결과: 인구가 가장 많은 사각지대는 " + (", ".join(f"{short(r.sido)} {r.sigungu}" for r in top.itertuples()) or "없음") + "입니다.",
+        "주황 선이 짧을수록 그 동네 주변에 갈 수 있는 응급의료기관이 거의 없다는 뜻입니다.",
+        "점선은 골든타임 안 시군구의 보통(중앙값) 수준이라, 선이 점선보다 한참 짧으면 '주변에 응급실이 없어서' 사각지대가 된 것입니다.",
+        f"이번 결과: 인구가 가장 많은 사각지대는 {short(show.iloc[-1]['sido'])} {show.iloc[-1]['sigungu']}이고, "
+        f"주변 {radius}km 안 기관은 {int(show.iloc[-1]['er_near'])}곳입니다.",
     ])
+
 
 
 def corr_heatmap(scope, er):

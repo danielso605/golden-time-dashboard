@@ -87,10 +87,10 @@ def index():
     few = len(scope) < 3            # 세종처럼 시군구가 1~2개뿐인 경우
     # 질문별로 그래프를 묶는다: ① 어디가 → ② 누가 → ③ 왜 → ④ 어떻게(시뮬레이션)
     plans = [
-        ("where", "사각지대 지도", lambda: C.map_chart(scope, ER, crit)),
+        ("where", "사각지대 지도", lambda: C.map_chart(scope, ER, crit, full=full)),
         ("where", "시도별 사각지대 비율", lambda: C.sido_rate_chart(full, sido)),
         ("where", "권역별 누적 도달 인구", lambda: C.cdf_chart(full, crit)),
-        ("where", "시도별 이동시간 분포", lambda: C.sido_box_chart(full, crit)),
+        ("where", "시도별 이동시간 구성", lambda: C.sido_mix_chart(full, crit)),
         ("who", "취약계층별 사각지대 비율", lambda: C.vulnerable_chart(full, sido)),
         ("who", "고령인구 비율과 이동시간", None if few else lambda: C.regression_chart(scope)),
         ("who", "도시와 농어촌 이동시간", lambda: C.area_kde_chart(scope, crit)),
@@ -129,7 +129,7 @@ def index():
         s_after = A.summary(after)
         sim_graphs = [
             pack(C.sim_bar_chart(s, s_after), mode, 12),
-            pack(C.map_chart(after, ER, crit, new_er=new_er,
+            pack(C.map_chart(after, ER, crit, new_er=new_er, full=after_full,
                              title=f"신설 후 골든타임 밖 인구 {s_after['blind_pop']:,}명 (신설 위치 = 보라색 +)"), mode, 13),
         ]
         sim_result = dict(picks=picks, after=s_after, graphs=sim_graphs,
